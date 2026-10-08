@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Fog Write</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; width: 100%; height: 100%; overflow: hidden;
+    background: #05070b; font-family: system-ui, sans-serif;
+  }
+  #stage { position: fixed; inset: 0; }
+  video, canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover;
+  }
+  #video { transform: scaleX(-1); }
+  #draw, #fog { pointer-events: none; }
+  #ui {
+    position: fixed; z-index: 10; top: 12px; left: 12px; right: 12px;
+    display: flex; gap: 8px; align-items: center; justify-content: space-between;
+    color: white;
+  }
+  .panel {
+    background: rgba(0,0,0,.55); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,.15); border-radius: 14px;
+    padding: 9px 12px; font-size: 13px;
+  }
+  button {
+    border: 0; border-radius: 12px; padding: 10px 14px;
+    font-weight: 700; background: white; color: #111;
+  }
+  #hint {
+    position: fixed; z-index: 10; bottom: 18px; left: 50%;
+    transform: translateX(-50%); color: white; text-align: center;
+    width: min(92%, 520px); font-size: 14px;
+    background: rgba(0,0,0,.5); padding: 10px 14px; border-radius: 14px;
+  }
+  #start {
+    position: fixed; z-index: 20; inset: 0; display: grid; place-items: center;
+    background: #05070b; color: white; text-align: center; padding: 24px;
+  }
+  #start .box { max-width: 430px; }
+  #start button { font-size: 17px; padding: 14px 24px; margin-top: 12px; }
+  #status { color: #9fffa7; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="fog"></canvas>
+  <canvas id="draw"></canvas>
+</div>
+
+<div id="ui">
+  <div class="panel">🎤 <span id="status">Ready</span></div>
+  <button id="clear">Clear</button>
+</div>
+
+<div id="hint">
+  Blow toward the microphone → fog appears. Pinch thumb + index finger → write. Release → pen lifts.
+</div>
+
+<div id="start">
+  <div class="box">
+    <h1>🌫️ Fog Write</h1>
+    <p>Camera + microphone + hand tracking</p>
+    <p>Blow to create a misty/foggy screen. Pinch your thumb and index finger to write in the fog.</p>
+    <button id="startBtn">Start Camera</button>
+    <p style="font-size:12px;opacity:.7">Camera and microphone permission are required.</p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<script>
+const video = document.getElementById('video');
+const fog = document.getElementById('fog');
+const draw = document.getElementById('draw');
+const fctx = fog.getContext('2d');
+const dctx = draw.getContext('2d');
+const statusEl = document.getElementById('status');
+const startScreen = document.getElementById('start');
+const startBtn = document.getElementById('startBtn');
+
+let W=innerWidth, H=innerHeight;
+let audioCtx, analyser, micData;
+let fogLevel = 0;
+let lastX = null, lastY = null;
+let writing = false;
+let camera;
+
+function resize() {
+  W = innerWidth; H = innerHeight;
+  fog.width = draw.width = W * devicePixelRatio;
+  fog.height = draw.height = H * devicePixelRatio;
+  fog.style.width = draw.style.width = W+'px';
+  fog.style.height = draw.style.height = H+'px';
+  fctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  dctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+}
+addEventListener('resize', resize);
+resize();
+
+document.getElementById('clear').onclick = () => {
+  dctx.clearRect(0,0,W,H);
+  fctx.clearRect(0,0,W,H);
+};
+
+async function startAudio() {
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  micData = new Uint8Array(analyser.fftSize);
+  const source = audioCtx.createMediaStreamSource(stream);
+  source.connect(analyser);
+}
+
+function monitorBreath() {
+  if (!analyser) return;
+  analyser.getByteTimeDomainData(micData);
+
+  let sum = 0;
+  for (let i=0;i<micData.length;i++) {
+    const v = (micData[i]-128)/128;
+    sum += v*v;
+  }
+  const rms = Math.sqrt(sum/micData.length);
+
+  // Adjust these if your phone mic is too sensitive/not sensitive.
+  const threshold = 0.045;
+
+  if (rms > threshold) {
+    fogLevel = Math.min(0.72, fogLevel + (rms-threshold)*3.2);
+    statusEl.textContent = 'Blowing — fogging!';
+  } else {
+    fogLevel *= 0.985;
+    statusEl.textContent = writing ? 'Writing' : 'Ready';
+  }
+
+  drawFog();
+  requestAnimationFrame(monitorBreath);
+}
+
+function drawFog() {
+  fctx.clearRect(0,0,W,H);
+  if (fogLevel < 0.01) return;
+
+  // Soft milky fog overlay. This is a visual effect; it does not put
+  // physical condensation on the phone camera lens.
+  const g = fctx.createRadialGradient(W/2,H*.48,10,W/2,H*.48,Math.max(W,H)*.75);
+  g.addColorStop(0, `rgba(245,248,255,${fogLevel})`);
+  g.addColorStop(.55, `rgba(225,235,245,${fogLevel*.55})`);
+  g.addColorStop(1, `rgba(210,225,240,${fogLevel*.18})`);
+  fctx.fillStyle = g;
+  fctx.fillRect(0,0,W,H);
+
+  // Small moving-looking mist patches
+  for (let i=0;i<14;i++) {
+    const x = (i*97 + performance.now()/45) % W;
+    const y = (i*173) % H;
+    const r = 35 + (i%4)*18;
+    const a = fogLevel*.035;
+    fctx.beginPath();
+    fctx.arc(x,y,r,0,Math.PI*2);
+    fctx.fillStyle = `rgba(255,255,255,${a})`;
+    fctx.fill();
+  }
+}
+
+const hands = new Hands({
+  locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6
+});
+
+hands.onResults(results => {
+  if (!results.multiHandLandmarks || !results.multiHandLandmarks.length) {
+    writing = false;
+    lastX = lastY = null;
+    return;
+  }
+
+  const lm = results.multiHandLandmarks[0];
+
+  // Thumb tip = 4, index tip = 8.
+  const dx = lm[4].x-lm[8].x;
+  const dy = lm[4].y-lm[8].y;
+  const pinchDistance = Math.hypot(dx,dy);
+  const pinched = pinchDistance < 0.065;
+
+  // Mirror X to match the mirrored camera preview.
+  const x = (1-lm[8].x) * W;
+  const y = lm[8].y * H;
+
+  if (pinched) {
+    if (!writing || lastX === null) {
+      lastX = x; lastY = y;
+      writing = true;
+      return;
+    }
+
+    dctx.lineCap = 'round';
+    dctx.lineJoin = 'round';
+    dctx.lineWidth = 5;
+    dctx.strokeStyle = 'rgba(45,70,95,0.92)';
+    dctx.beginPath();
+    dctx.moveTo(lastX,lastY);
+    dctx.lineTo(x,y);
+    dctx.stroke();
+
+    lastX=x; lastY=y;
+    statusEl.textContent = 'Writing';
+  } else {
+    writing = false;
+    lastX = lastY = null;
+  }
+});
+
+async function start() {
+  try {
+    startBtn.textContent = 'Starting...';
+    await startAudio();
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width:{ideal:1280}, height:{ideal:720} },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    camera = new Camera(video, {
+      onFrame: async () => { await hands.send({image:video}); },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+
+    startScreen.style.display='none';
+    monitorBreath();
+  } catch (err) {
+    alert('Camera/microphone could not start. Make sure the site is opened over HTTPS and permissions are allowed.\\n\\n'+err.message);
+    startBtn.textContent = 'Try Again';
+  }
+}
+
+startBtn.onclick = start;
+</script>
+</body>
+</html>
